@@ -1,4 +1,4 @@
-//! 裁判例のデータ一覧を(裁判所のホームページ)[https://www.courts.go.jp/index.html]をスクレイピングして生成するソフトウェア
+//! 裁判例のデータ一覧を[裁判所のホームページ](https://www.courts.go.jp/index.html)をスクレイピングして生成するソフトウェア
 //! 
 
 use anyhow::{anyhow, Result};
