@@ -1,5 +1,5 @@
 //! 裁判例のデータ一覧を[裁判所のホームページ](https://www.courts.go.jp/index.html)をスクレイピングして生成するソフトウェア
-//! 
+//!
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -94,9 +94,23 @@ async fn parse_date(str: &str) -> Result<Date> {
 async fn parse_date_era_str(str: &str) -> Result<Date> {
   let re =
     Regex::new(r"(?P<era>[^0-9]+)(?P<era_year>\d+)年(?P<month>\d+)月(?P<day>\d+)日").unwrap();
-  let caps = re
-    .captures(str)
-    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?;
+  let re_gan = Regex::new(r"(?P<era>[^0-9]+)元年(?P<month>\d+)月(?P<day>\d+)日").unwrap();
+  let (caps, era_year) = match re.captures(str) {
+    Some(caps) => {
+      let era_year = caps
+        .name("era_year")
+        .map(|v| v.as_str())
+        .ok_or_else(|| anyhow!("年号付き日付のパースに失敗（年）"))?
+        .parse::<usize>()?;
+      (caps, era_year)
+    }
+    None => {
+      let caps = re_gan
+        .captures(str)
+        .ok_or_else(|| anyhow!("年号付き日付のパースに失敗：{}", str))?;
+      (caps, 1)
+    }
+  };
   let era = match caps.name("era").map(|v| v.as_str()) {
     Some("昭和") => Era::Showa,
     Some("平成") => Era::Heisei,
@@ -106,11 +120,6 @@ async fn parse_date_era_str(str: &str) -> Result<Date> {
       return Err(anyhow!("元号が適切でない"));
     }
   };
-  let era_year = caps
-    .name("era_year")
-    .map(|v| v.as_str())
-    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
-    .parse::<usize>()?;
   let year = match era {
     Era::Showa => era_year + 1925,
     Era::Heisei => era_year + 1988,
@@ -119,12 +128,12 @@ async fn parse_date_era_str(str: &str) -> Result<Date> {
   let month = caps
     .name("month")
     .map(|v| v.as_str())
-    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
+    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗（月）"))?
     .parse::<usize>()?;
   let day = caps
     .name("day")
     .map(|v| v.as_str())
-    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
+    .ok_or_else(|| anyhow!("年号付き日付のパースに失敗（日）"))?
     .parse::<usize>()?;
   Ok(Date {
     era,
