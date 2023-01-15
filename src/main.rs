@@ -598,7 +598,7 @@ async fn main() -> Result<()> {
           _ => println!("!!! OTHER: {}", &dt_text),
         }
       }
-      let date = parse_date_era_str(&date_str.trim()).await?;
+      let date = parse_date_era_str(date_str.trim()).await?;
       let precedent_info = PrecedentInfo {
         trial_type,
         date,
