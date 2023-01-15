@@ -207,6 +207,9 @@ pub struct PrecedentInfo {
   /// 原審事件番号
   #[serde(skip_serializing_if = "Option::is_none")]
   pub original_case_number: Option<String>,
+  /// 原審裁判年月日
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub original_date: Option<Date>,
   /// 分野
   #[serde(skip_serializing_if = "Option::is_none")]
   pub field: Option<String>,
@@ -348,6 +351,7 @@ async fn main() -> Result<()> {
       let mut original_court_name = None;
       let mut original_case_number = None;
       let mut original_result = None;
+      let mut original_date = None;
       let mut field = None;
       let mut gist = None;
       let mut case_gist = None;
@@ -515,6 +519,20 @@ async fn main() -> Result<()> {
               original_result = Some(text);
             }
           }
+          "原審裁判年月日" => {
+            let text = info_element
+              .select(&dd_text_selector)
+              .next()
+              .unwrap()
+              .text()
+              .collect::<String>()
+              .trim()
+              .to_string();
+            let date = parse_date_era_str(&text).await?;
+            if !text.is_empty() {
+              original_date = Some(date);
+            }
+          }
           "分野" => {
             let text = info_element
               .select(&dd_text_selector)
@@ -595,6 +613,7 @@ async fn main() -> Result<()> {
         original_court_name,
         original_case_number,
         original_result,
+        original_date,
         field,
         gist,
         case_gist,
