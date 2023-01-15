@@ -40,7 +40,7 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.56.0
+        toolchain: 1.64.0
         profile: minimal
         override: true
     - run: cargo check --verbose
