@@ -528,8 +528,8 @@ async fn main() -> Result<()> {
               .collect::<String>()
               .trim()
               .to_string();
-            let date = parse_date_era_str(&text).await?;
             if !text.is_empty() {
+              let date = parse_date_era_str(&text).await?;
               original_date = Some(date);
             }
           }
