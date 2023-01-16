@@ -62,7 +62,7 @@
 //!
 //!
 //! ---
-//! [MIT License](https://github.com/japanese-law-analysis/ocr_precedent/blob/master/LICENSE)
+//! [MIT License](https://github.com/japanese-law-analysis/listup_precedent/blob/master/LICENSE)
 //! (c) 2023 Naoki Kaneko (a.k.a. "puripuri2100")
 //!
 
