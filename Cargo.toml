@@ -2,9 +2,17 @@
 name = "listup_precedent"
 version = "0.1.0"
 edition = "2021"
+authors = ["Naoki Kaneko <puripuri2100@gmail.com>"]
 rust = "1.64.0"
+license = "MIT"
+description = "裁判例のデータ一覧を裁判所のホームページ(https://www.courts.go.jp)をスクレイピングして生成するソフトウェア"
+readme = "README.md"
+repository = "https://github.com/japanese-law-analysis/listup_precedent"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[badges]
+github = { repository = "japanese-law-analysis/listup_precedent", workflow = "Rust CI" }
 
 [dependencies]
 anyhow = "1.0.68"
