@@ -301,7 +301,7 @@ async fn main() -> Result<()> {
   let mut output_file = File::create(file_path).await?;
   let mut is_head = true;
   println!("[START] writing file: {}", &file_path);
-  output_file.write_all("[".as_bytes()).await?;
+  output_file.write_all("{".as_bytes()).await?;
   while let Some(page_num) = stream.next().await {
     println!("page_num: {}", page_num);
     let html = get_reqest(&start_date, &end_date, page_num).await?;
@@ -600,9 +600,9 @@ async fn main() -> Result<()> {
       }
       let date = parse_date_era_str(&date_str).await?;
       let precedent_info = PrecedentInfo {
-        trial_type,
-        date,
-        case_number,
+        trial_type: trial_type.clone(),
+        date: date.clone(),
+        case_number: case_number.clone(),
         case_name,
         court_name,
         right_type,
@@ -629,6 +629,18 @@ async fn main() -> Result<()> {
       } else {
         output_file.write_all(",\n".as_bytes()).await?;
       }
+      let tag_str = if case_number.is_empty() {
+        format!(
+          r#""null_{}_{}_{}_{trial_type:?}":"#,
+          date.year, date.month, date.day
+        )
+      } else {
+        format!(
+          r#""{case_number}_{}_{}_{}_{trial_type:?}":"#,
+          date.year, date.month, date.day
+        )
+      };
+      output_file.write_all(tag_str.as_bytes()).await?;
       output_file
         .write_all(precedent_info_json_str.as_bytes())
         .await?;
@@ -639,7 +651,7 @@ async fn main() -> Result<()> {
       is_head = false
     }
   }
-  output_file.write_all("\n]".as_bytes()).await?;
+  output_file.write_all("\n}".as_bytes()).await?;
   output_file.flush().await?;
   println!("[END] write json file");
   Ok(())
