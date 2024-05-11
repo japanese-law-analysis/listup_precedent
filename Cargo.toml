@@ -3,11 +3,11 @@ name = "listup_precedent"
 version = "0.1.0"
 edition = "2021"
 authors = ["Naoki Kaneko <puripuri2100@gmail.com>"]
-rust = "1.64.0"
 license = "MIT"
 description = "裁判例のデータ一覧を裁判所のホームページ(https://www.courts.go.jp)をスクレイピングして生成するソフトウェア"
 readme = "README.md"
 repository = "https://github.com/japanese-law-analysis/listup_precedent"
+rust-version = "1.74.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -16,15 +16,17 @@ github = { repository = "japanese-law-analysis/listup_precedent", workflow = "Ru
 
 [dependencies]
 anyhow = "1.0.68"
-clap = { version = "4.1.0", features = ["derive"] }
 log = "0.4.17"
 regex = "1.7.1"
 reqwest = "0.11.13"
 scraper = "0.14.0"
-serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.91"
-tokio = { version = "1.24.1", features = ["full"] }
-tokio-stream = "0.1.11"
 tracing = "0.1.37"
-tracing-subscriber = "0.3.16"
 url = "2.3.1"
+jplaw_io = { git = "https://github.com/japanese-law-analysis/jplaw_tools.git", rev = "6e09b18" }
+jplaw_data_types = { git = "https://github.com/japanese-law-analysis/jplaw_tools.git", rev = "6e09b18" }
+jplaw_pdf2text = { git = "https://github.com/japanese-law-analysis/jplaw_tools.git", rev = "6e09b18" }
+tokio = { version = "1.37.0", features = ["full"] }
+tokio-stream = "0.1.15"
+clap = { version = "4.5.4", features = ["derive"] }
+japanese_law_xml_schema = "4.0.0"

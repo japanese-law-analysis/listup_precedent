@@ -9,7 +9,7 @@
 //! # Use
 //!
 //! ```sh
-//! listup_precedent --start "2022/01/12" --end "2023/12/01" --output "output.json"
+//! listup_precedent --start "2022/01/12" --end "2023/12/01" --output "output" --index "output/list.json"
 //! ```
 //!
 //! のようにして使用します。すべて必須オプションです。
@@ -17,7 +17,8 @@
 //! `--start`オプションと`--end`オプションにはそれぞれ`yyyy/mm/dd`形式の日付を与えます。
 //! この２つの日付の間に判決が出た裁判例の情報を生成します。
 //!
-//! `--output`オプションにはその生成した裁判例の情報を書き出すJSONファイルまでのpathを与えます。
+//! - `--output`オプションにはその生成した裁判例の情報を書き出すフォルダのpathを与えます。
+//! - `--index`オプションには裁判例情報の一覧を書き出すJSONファイルのpathを与えます。
 //!
 //! # 生成される情報
 //!
@@ -68,38 +69,30 @@
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
-//use log::*;
+use japanese_law_xml_schema::law::Era;
+use jplaw_data_types::{
+  law::Date,
+  listup::{PrecedentData, PrecedentInfo},
+  precedent::TrialType,
+};
+use jplaw_io::{flush_file_value_lst, gen_file_value_lst, init_logger, write_value_lst};
+use jplaw_pdf2text::{clean_up, pdf_bytes_to_text};
 use regex::Regex;
 use scraper::{Html, Selector};
-use serde::{Deserialize, Serialize};
 use tokio::{self, fs::*, io::AsyncWriteExt};
 use tokio_stream::StreamExt;
+use tracing::*;
 use url::Url;
 
 const COURTS_DOMEIN: &str = "https://www.courts.go.jp";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Era {
-  Showa,
-  Heisei,
-  Reiwa,
-}
 
 async fn era_to_uri_encode(era: &Era) -> String {
   match era {
     Era::Showa => "%E6%98%AD%E5%92%8C".to_string(),
     Era::Heisei => "%E5%B9%B3%E6%88%90".to_string(),
     Era::Reiwa => "%E4%BB%A4%E5%92%8C".to_string(),
+    _ => unreachable!(),
   }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Date {
-  pub era: Era,
-  pub era_year: usize,
-  pub year: usize,
-  pub month: usize,
-  pub day: usize,
 }
 
 async fn parse_date(str: &str) -> Result<Date> {
@@ -121,39 +114,11 @@ async fn parse_date(str: &str) -> Result<Date> {
 
   let day = day_str.parse::<usize>()?;
 
-  let date_id = year * 10000 + month * 100 + day;
-
   if 12 < month || 31 < day {
     return Err(anyhow!("日付が範囲外です"));
   }
 
-  if (19261225..=19890107).contains(&date_id) {
-    Ok(Date {
-      era: Era::Showa,
-      era_year: year - 1925,
-      year,
-      month,
-      day,
-    })
-  } else if (19890108..=20190430).contains(&date_id) {
-    Ok(Date {
-      era: Era::Heisei,
-      era_year: year - 1988,
-      year,
-      month,
-      day,
-    })
-  } else if 20190501 <= date_id {
-    Ok(Date {
-      era: Era::Reiwa,
-      era_year: year - 2018,
-      year,
-      month,
-      day,
-    })
-  } else {
-    Err(anyhow!("日付が範囲外です"))
-  }
+  Ok(Date::gen_from_ad(year, month, day))
 }
 
 async fn parse_date_era_str(str: &str) -> Result<Date> {
@@ -181,14 +146,9 @@ async fn parse_date_era_str(str: &str) -> Result<Date> {
     Some("平成") => Era::Heisei,
     Some("令和") => Era::Reiwa,
     v => {
-      println!("v {:?}", v);
+      info!("v {:?}", v);
       return Err(anyhow!("元号が適切でない"));
     }
-  };
-  let year = match era {
-    Era::Showa => era_year + 1925,
-    Era::Heisei => era_year + 1988,
-    Era::Reiwa => era_year + 2018,
   };
   let month = caps
     .name("month")
@@ -202,100 +162,24 @@ async fn parse_date_era_str(str: &str) -> Result<Date> {
     .parse::<usize>()?;
   Ok(Date {
     era,
-    era_year,
-    year,
-    month,
-    day,
+    year: era_year,
+    month: Some(month),
+    day: Some(day),
   })
 }
 
 async fn get_reqest(start_date: &Date, end_date: &Date, page: usize) -> Result<String> {
   // https://www.courts.go.jp/app/hanrei_jp/list1?page={page}&sort=1&filter[judgeDateMode]=2&filter[judgeGengoFrom]={}&filter[judgeYearFrom]={}&filter[judgeMonthFrom]={}&filter[judgeDayFrom]={}&filter[judgeGengoTo]={}&filter[judgeYearTo]={}&filter[judgeMonthTo]={}&filter[judgeDayTo]={}
-  let url_str = format!("{COURTS_DOMEIN}/app/hanrei_jp/list1?page={page}&sort=1&filter%5BjudgeDateMode%5D=2&filter%5BjudgeGengoFrom%5D={}&filter%5BjudgeYearFrom%5D={}&filter%5BjudgeMonthFrom%5D={}&filter%5BjudgeDayFrom%5D={}&filter%5BjudgeGengoTo%5D={}&filter%5BjudgeYearTo%5D={}&filter%5BjudgeMonthTo%5D={}&filter%5BjudgeDayTo%5D={}", era_to_uri_encode(&start_date.era).await, start_date.era_year, start_date.month, start_date.day, era_to_uri_encode(&end_date.era).await, end_date.era_year, end_date.month, end_date.day);
+  let url_str = format!("{COURTS_DOMEIN}/app/hanrei_jp/list1?page={page}&sort=1&filter%5BjudgeDateMode%5D=2&filter%5BjudgeGengoFrom%5D={}&filter%5BjudgeYearFrom%5D={}&filter%5BjudgeMonthFrom%5D={}&filter%5BjudgeDayFrom%5D={}&filter%5BjudgeGengoTo%5D={}&filter%5BjudgeYearTo%5D={}&filter%5BjudgeMonthTo%5D={}&filter%5BjudgeDayTo%5D={}", era_to_uri_encode(&start_date.era).await, start_date.year, start_date.month.unwrap_or_default(), start_date.day.unwrap_or_default(), era_to_uri_encode(&end_date.era).await, end_date.year, end_date.month.unwrap_or_default(), end_date.day.unwrap_or_default());
   let body = reqwest::get(url_str).await?.text().await?;
   Ok(body)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TrialType {
-  /// 最高裁判所
-  SupremeCourt,
-  /// 高等裁判所
-  HighCourt,
-  /// 下級裁判所
-  LowerCourt,
-  /// 行政事件
-  AdministrativeCase,
-  /// 労働事件
-  LaborCase,
-  /// 知的財産
-  IPCase,
-}
-
-/// 判例集のページにあるフィールド
-/// 具体例：
-/// - 最高裁判所：https://www.courts.go.jp/app/hanrei_jp/detail2?id=91536
-/// - 高等裁判所：https://www.courts.go.jp/app/hanrei_jp/detail3?id=91553
-/// - 下級裁判所：https://www.courts.go.jp/app/hanrei_jp/detail4?id=91676
-/// - 行政事件：https://www.courts.go.jp/app/hanrei_jp/detail5?id=91434
-/// - 労働事件：https://www.courts.go.jp/app/hanrei_jp/detail6?id=90799
-/// - 知的財産：https://www.courts.go.jp/app/hanrei_jp/detail7?id=91661
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrecedentInfo {
-  pub trial_type: TrialType,
-  /// 裁判年月日
-  pub date: Date,
-  /// 事件番号
-  pub case_number: String,
-  /// 事件名
-  pub case_name: String,
-  /// 裁判所・部・法廷名
-  pub court_name: String,
-  /// 争われた対象の権利の種別
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub right_type: Option<String>,
-  /// 訴訟類型
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub lawsuit_type: Option<String>,
-  /// 裁判種別
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub result_type: Option<String>,
-  /// 結果
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub result: Option<String>,
-  /// 判例集等巻・号・頁
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub article_info: Option<String>,
-  /// 原審裁判所名
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub original_court_name: Option<String>,
-  /// 原審事件番号
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub original_case_number: Option<String>,
-  /// 原審裁判年月日
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub original_date: Option<Date>,
-  /// 原審結果
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub original_result: Option<String>,
-  /// 分野
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub field: Option<String>,
-  /// 判示事項の要旨
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub gist: Option<String>,
-  /// 裁判要旨
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub case_gist: Option<String>,
-  /// 参照法条
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub ref_law: Option<String>,
-  /// 事件に振られているID
-  pub lawsuit_id: String,
-  /// 詳細が乗っているページ
-  pub detail_page_link: String,
-  /// 判決文前文
-  pub full_pdf_link: String,
+async fn get_pdf_text(pdf_link: &str) -> Result<String> {
+  let bytes = reqwest::get(pdf_link).await?.bytes().await?;
+  let text = pdf_bytes_to_text(&bytes)?;
+  let text = clean_up(&text);
+  Ok(text)
 }
 
 async fn get_lawsuit_id(url_str: &str) -> Result<String> {
@@ -309,38 +193,44 @@ fn remove_line_break(str: &str) -> String {
   str.lines().map(|s| s.trim()).collect::<String>()
 }
 
+async fn write_data(output: &str, filename: &str, data: &PrecedentData) -> Result<()> {
+  let mut buf = File::create(format!("{output}/{filename}.json")).await?;
+  let s = serde_json::to_string_pretty(&data)?;
+  buf.write_all(s.as_bytes()).await?;
+  buf.flush().await?;
+  Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
   /// 解析結果を出力するJSONファイルへのpath
   #[clap(short, long)]
   output: String,
+  /// 一覧を出力するJSONファイル名
+  #[clap(short, long)]
+  index: String,
   /// 取得したい判例の日時の開始 yyyy/mm/dd形式で記述
   #[clap(short, long)]
   start: String,
   /// 取得したい判例の日時の終了 yyyy/mm/dd形式で記述
   #[clap(short, long)]
   end: String,
+  /// 一回のrowについてのAPIアクセスが行われるたびにsleepする時間（ミリ秒）
+  #[clap(short, long, default_value = "500")]
+  sleep_time: u64,
 }
-
-//async fn init_logger() -> Result<()> {
-//  let subscriber = tracing_subscriber::fmt()
-//    .with_max_level(tracing::Level::INFO)
-//    .finish();
-//  tracing::subscriber::set_global_default(subscriber)?;
-//  Ok(())
-//}
 
 #[tokio::main]
 async fn main() -> Result<()> {
   let args = Args::parse();
-  //init_logger().await?;
+  init_logger().await?;
 
   let start_date = parse_date(&args.start).await?;
   let end_date = parse_date(&args.end).await?;
 
-  println!("start_date: {}", &args.start);
-  println!("end_date: {}", &args.end);
+  info!("start_date: {}", &args.start);
+  info!("end_date: {}", &args.end);
 
   let top_html = get_reqest(&start_date, &end_date, 1).await?;
   let top_document = Html::parse_document(&top_html);
@@ -363,14 +253,12 @@ async fn main() -> Result<()> {
   let mut stream = tokio_stream::iter(1..=all_page_quantity);
   let link_re = Regex::new(r"[^\d]+(?P<type_number>\d).*").unwrap();
   let file_path = &args.output;
-  let mut output_file = File::create(file_path).await?;
-  let mut is_head = true;
-  println!("[START] writing file: {}", &file_path);
-  output_file.write_all("{".as_bytes()).await?;
+  let mut index_file = gen_file_value_lst(&args.index).await?;
+  info!("[START] writing file: {}", &file_path);
   while let Some(page_num) = stream.next().await {
-    println!("page_num: {}", page_num);
+    info!("page_num: {}", page_num);
     let html = get_reqest(&start_date, &end_date, page_num).await?;
-    println!("html ok");
+    info!("html ok");
     let page_document = Html::parse_document(&html);
     let detail_page_link_selector = Selector::parse("table > tbody > tr > th > a").unwrap();
     let mut detail_page_link_stream =
@@ -380,7 +268,7 @@ async fn main() -> Result<()> {
         .value()
         .attr("href")
         .expect("a属性はhrefを持っているはず");
-      println!("link: {}", &link);
+      info!("link: {}", &link);
       let trial_type = match link_re
         .captures(link)
         .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
@@ -399,7 +287,7 @@ async fn main() -> Result<()> {
       };
       let detail_page_link = format!("{COURTS_DOMEIN}{link}");
       let lawsuit_id = get_lawsuit_id(&detail_page_link).await?;
-      println!("[START] date write: {}", &lawsuit_id);
+      info!("[START] date write: {}", &lawsuit_id);
       let detail_page_html = reqwest::get(&detail_page_link).await?.text().await?;
       let detail_document = Html::parse_document(&detail_page_html);
       let info_selector =
@@ -660,11 +548,11 @@ async fn main() -> Result<()> {
               .expect("a属性はhrefを持っているはず");
             full_pdf_link = format!("{COURTS_DOMEIN}{link}");
           }
-          _ => println!("!!! OTHER: {}", &dt_text),
+          _ => info!("!!! OTHER: {}", &dt_text),
         }
       }
       let date = parse_date_era_str(date_str.trim()).await?;
-      let precedent_info = PrecedentInfo {
+      let precedent_data = PrecedentData {
         trial_type: trial_type.clone(),
         date: date.clone(),
         case_number: case_number.clone(),
@@ -685,39 +573,26 @@ async fn main() -> Result<()> {
         ref_law,
         lawsuit_id: lawsuit_id.clone(),
         detail_page_link,
+        contents: get_pdf_text(&full_pdf_link).await.ok(),
         full_pdf_link,
       };
-      let precedent_info_json_str = serde_json::to_string(&precedent_info)?;
-      if is_head {
-        output_file.write_all("\n".as_bytes()).await?;
-        is_head = false;
-      } else {
-        output_file.write_all(",\n".as_bytes()).await?;
-      }
-      let tag_str = if case_number.is_empty() {
-        format!(
-          r#""null_{}_{}_{}_{trial_type:?}":"#,
-          date.year, date.month, date.day
-        )
-      } else {
-        format!(
-          r#""{case_number}_{}_{}_{}_{trial_type:?}":"#,
-          date.year, date.month, date.day
-        )
+      let precedent_info = PrecedentInfo {
+        case_number: precedent_data.case_number.clone(),
+        court_name: precedent_data.court_name.clone(),
+        trial_type: precedent_data.trial_type.clone(),
+        date: precedent_data.date.clone(),
+        lawsuit_id: precedent_data.lawsuit_id.clone(),
       };
-      output_file.write_all(tag_str.as_bytes()).await?;
-      output_file
-        .write_all(precedent_info_json_str.as_bytes())
-        .await?;
-      println!("[END] date write: {}", &lawsuit_id);
+      let file_name = precedent_info.file_name();
+      write_data(&args.output, &file_name, &precedent_data).await?;
+      write_value_lst(&mut index_file, &precedent_info).await?;
+      info!("[END] date write: {}", &lawsuit_id);
     }
-
-    if is_head {
-      is_head = false
-    }
+    // 負荷を抑えるために500ミリ秒待つ
+    info!("sleep");
+    tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
   }
-  output_file.write_all("\n}".as_bytes()).await?;
-  output_file.flush().await?;
-  println!("[END] write json file");
+  flush_file_value_lst(&mut index_file).await?;
+  info!("[END] write json file");
   Ok(())
 }
