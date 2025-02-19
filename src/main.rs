@@ -96,29 +96,51 @@ async fn era_to_uri_encode(era: &Era) -> String {
 }
 
 async fn parse_date(str: &str) -> Result<Date> {
-  let mut chars = str.chars();
+  let re1 = Regex::new("(?<y>[0-9]{4})/(?<m>[0-9]{2})/(?<d>[0-9]{2})").unwrap();
+  let re2 = Regex::new("(?<y>[0-9]{4})-(?<m>[0-9]{2})-(?<d>[0-9]{2})").unwrap();
+  let re3 = Regex::new("(?<y>[0-9]{4})(?<m>[0-9]{2})(?<d>[0-9]{2})").unwrap();
 
-  let year_str = chars.by_ref().take(4).collect::<String>();
-
-  let year = year_str.parse::<usize>()?;
-
-  let _ = chars.by_ref().take(1).collect::<String>();
-
-  let month_str = chars.by_ref().take(2).collect::<String>();
-
-  let month = month_str.parse::<usize>()?;
-
-  let _ = chars.by_ref().take(1).collect::<String>();
-
-  let day_str = chars.by_ref().take(2).collect::<String>();
-
-  let day = day_str.parse::<usize>()?;
-
-  if 12 < month || 31 < day {
-    return Err(anyhow!("日付が範囲外です"));
+  if let Some(caps) = re1.captures(str) {
+    let y = &caps["y"];
+    let y = y.parse::<usize>()?;
+    let m = &caps["m"];
+    let m = m.parse::<usize>()?;
+    let d = &caps["d"];
+    let d = d.parse::<usize>()?;
+    if 12 < m || 31 < d {
+      Err(anyhow!("日付が範囲外です"))
+    } else {
+      Ok(Date::gen_from_ad(y, m, d))
+    }
+  } else if let Some(caps) = re2.captures(str) {
+    let y = &caps["y"];
+    let y = y.parse::<usize>()?;
+    let m = &caps["m"];
+    let m = m.parse::<usize>()?;
+    let d = &caps["d"];
+    let d = d.parse::<usize>()?;
+    if 12 < m || 31 < d {
+      return Err(anyhow!("日付が範囲外です"));
+    } else {
+      Ok(Date::gen_from_ad(y, m, d))
+    }
+  } else if let Some(caps) = re3.captures(str) {
+    let y = &caps["y"];
+    let y = y.parse::<usize>()?;
+    let m = &caps["m"];
+    let m = m.parse::<usize>()?;
+    let d = &caps["d"];
+    let d = d.parse::<usize>()?;
+    if 12 < m || 31 < d {
+      return Err(anyhow!("日付が範囲外です"));
+    } else {
+      Ok(Date::gen_from_ad(y, m, d))
+    }
+  } else {
+    Err(anyhow!(
+      "対応していない日付のフォーマットです。対応フォーマット：yyyy/MM/dd, yyyy-MM-dd, yyyyMMdd"
+    ))
   }
-
-  Ok(Date::gen_from_ad(year, month, day))
 }
 
 async fn parse_date_era_str(str: &str) -> Result<Date> {
@@ -194,7 +216,7 @@ fn remove_line_break(str: &str) -> String {
 }
 
 async fn write_data(output: &str, filename: &str, data: &PrecedentData) -> Result<()> {
-  let mut buf = File::create(format!("{output}/{filename}.json")).await?;
+  let mut buf = File::create(format!("{output}/{filename}")).await?;
   let s = serde_json::to_string_pretty(&data)?;
   buf.write_all(s.as_bytes()).await?;
   buf.flush().await?;
@@ -204,16 +226,16 @@ async fn write_data(output: &str, filename: &str, data: &PrecedentData) -> Resul
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
-  /// 解析結果を出力するJSONファイルへのpath
+  /// 各判例の詳細なデータが書かれたJSONファイルを出力するフォルダのパス
   #[clap(short, long)]
   output: String,
-  /// 一覧を出力するJSONファイル名
+  /// 一覧を出力するJSONファイルのパス
   #[clap(short, long)]
   index: String,
-  /// 取得したい判例の日時の開始 yyyy/mm/dd形式で記述
+  /// 取得したい判例の日時の開始 yyyyMMdd形式・yyyy-MM-dd形式・yyyy/MM/dd形式で記述
   #[clap(short, long)]
   start: String,
-  /// 取得したい判例の日時の終了 yyyy/mm/dd形式で記述
+  /// 取得したい判例の日時の終了 yyyyMMdd形式・yyyy-MM-dd形式・yyyy/MM/dd形式で記述
   #[clap(short, long)]
   end: String,
   /// 一回のrowについてのAPIアクセスが行われるたびにsleepする時間（ミリ秒）
