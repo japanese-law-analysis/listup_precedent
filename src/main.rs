@@ -82,7 +82,6 @@ use scraper::{Html, Selector};
 use tokio::{self, fs::*, io::AsyncWriteExt};
 use tokio_stream::StreamExt;
 use tracing::*;
-use url::Url;
 
 const COURTS_DOMEIN: &str = "https://www.courts.go.jp";
 
@@ -168,25 +167,357 @@ async fn parse_date_era_str(str: &str) -> Result<Date> {
   })
 }
 
-async fn get_reqest(start_date: &Date, end_date: &Date, page: usize) -> Result<String> {
-  // https://www.courts.go.jp/app/hanrei_jp/list1?page={page}&sort=1&filter[judgeDateMode]=2&filter[judgeGengoFrom]={}&filter[judgeYearFrom]={}&filter[judgeMonthFrom]={}&filter[judgeDayFrom]={}&filter[judgeGengoTo]={}&filter[judgeYearTo]={}&filter[judgeMonthTo]={}&filter[judgeDayTo]={}
-  let url_str = format!("{COURTS_DOMEIN}/app/hanrei_jp/list1?page={page}&sort=1&filter%5BjudgeDateMode%5D=2&filter%5BjudgeGengoFrom%5D={}&filter%5BjudgeYearFrom%5D={}&filter%5BjudgeMonthFrom%5D={}&filter%5BjudgeDayFrom%5D={}&filter%5BjudgeGengoTo%5D={}&filter%5BjudgeYearTo%5D={}&filter%5BjudgeMonthTo%5D={}&filter%5BjudgeDayTo%5D={}", era_to_uri_encode(&start_date.era).await, start_date.year, start_date.month.unwrap_or_default(), start_date.day.unwrap_or_default(), era_to_uri_encode(&end_date.era).await, end_date.year, end_date.month.unwrap_or_default(), end_date.day.unwrap_or_default());
+async fn get_index_page(start_date: &Date, end_date: &Date, offset: usize) -> Result<String> {
+  // https://www.courts.go.jp/hanrei/search1/index.html?query1=&query2=&filter%5BjudgeDateMode%5D=2&filter%5BjudgeGengoFrom%5D=%E4%BB%A4%E5%92%8C&filter%5BjudgeYearFrom%5D=1&filter%5BjudgeMonthFrom%5D=1&filter%5BjudgeDayFrom%5D=1&filter%5BjudgeGengoTo%5D=%E4%BB%A4%E5%92%8C&filter%5BjudgeYearTo%5D=1&filter%5BjudgeMonthTo%5D=2&filter%5BjudgeDayTo%5D=1&filter%5BjikenGengo%5D=&filter%5BjikenYear%5D=&filter%5BjikenCode%5D=&filter%5BjikenNumber%5D=&filter%5BcourtType%5D=&filter%5BcourtSection%5D=&filter%5BcourtName%5D=&filter%5BbranchName%5D=&offset=30#searched
+  let url_str = format!("{COURTS_DOMEIN}/hanrei/search1/index.html?query1=&query2=&filter%5BjudgeDateMode%5D=2&filter%5BjudgeGengoFrom%5D={}&filter%5BjudgeYearFrom%5D={}&filter%5BjudgeMonthFrom%5D={}&filter%5BjudgeDayFrom%5D={}&filter%5BjudgeGengoTo%5D={}&filter%5BjudgeYearTo%5D={}&filter%5BjudgeMonthTo%5D={}&filter%5BjudgeDayTo%5D={}&filter%5BjikenGengo%5D=&filter%5BjikenYear%5D=&filter%5BjikenCode%5D=&filter%5BjikenNumber%5D=&filter%5BcourtType%5D=&filter%5BcourtSection%5D=&filter%5BcourtName%5D=&filter%5BbranchName%5D=&offset={offset}#searched", era_to_uri_encode(&start_date.era).await, start_date.year, start_date.month.unwrap_or_default(), start_date.day.unwrap_or_default(), era_to_uri_encode(&end_date.era).await, end_date.year, end_date.month.unwrap_or_default(), end_date.day.unwrap_or_default());
+
   let body = reqwest::get(url_str).await?.text().await?;
   Ok(body)
 }
 
-async fn get_pdf_text(pdf_link: &str) -> Result<String> {
-  let bytes = reqwest::get(pdf_link).await?.bytes().await?;
-  let text = pdf_bytes_to_text(&bytes)?;
-  let text = clean_up(&text);
-  Ok(text)
+const LINK_RE: &str = r#"^\./\.\./(?<id>\d+)/(?<link>.+)$"#;
+
+async fn parse_index_page(page: Html) -> Vec<(usize, String)> {
+  let mut v = Vec::new();
+  let link_re = Regex::new(LINK_RE).unwrap();
+  let detail_page_link_selector =
+    Selector::parse("table.search-result-table > tbody > tr > th > a").unwrap();
+  let mut detail_page_link_stream = tokio_stream::iter(page.select(&detail_page_link_selector));
+  while let Some(detail_page_link) = detail_page_link_stream.next().await {
+    let link = detail_page_link
+      .value()
+      .attr("href")
+      .expect("a属性はhrefを持っているはず");
+    let cap = link_re.captures(link).unwrap();
+    let lawsuit_id = cap.name("id").unwrap().as_str().parse::<usize>().unwrap();
+    let detail_page_link = format!(
+      "{COURTS_DOMEIN}/hanrei/{lawsuit_id}/{}",
+      cap.name("link").unwrap().as_str()
+    );
+    v.push((lawsuit_id, detail_page_link))
+  }
+  v
 }
 
-async fn get_lawsuit_id(url_str: &str) -> Result<String> {
-  let url = Url::parse(url_str)?;
-  let mut querys = url.query_pairs();
-  let id = querys.next().ok_or_else(|| anyhow!("リンクにidが無い"))?.1;
-  Ok(id.to_string())
+const PDF_LINK_RE: &str = r#"^\./(\.\./)+(?<link>.+)$"#;
+
+async fn get_and_parse_detail_page(
+  detail_page_link: String,
+  lawsuit_id: usize,
+  trial_type: TrialType,
+  pdf_folder: &str,
+) -> Result<PrecedentData> {
+  let pdf_link_re = Regex::new(PDF_LINK_RE).unwrap();
+  let detail_page_html = reqwest::get(&detail_page_link).await?.text().await?;
+  let detail_document = Html::parse_document(&detail_page_html);
+  let info_selector = Selector::parse("div.module-sub-page-parts-table > dl").unwrap();
+  let mut date_str = String::new();
+  let mut case_number = String::new();
+  let mut case_name = String::new();
+  let mut court_name = String::new();
+  let mut right_type = None;
+  let mut lawsuit_type = None;
+  let mut result_type = None;
+  let mut result = None;
+  let mut article_info = None;
+  let mut original_court_name = None;
+  let mut original_case_number = None;
+  let mut original_result = None;
+  let mut original_date = None;
+  let mut field = None;
+  let mut gist = None;
+  let mut case_gist = None;
+  let mut ref_law = None;
+  let mut full_pdf_link = String::new();
+  let mut info_stream = tokio_stream::iter(detail_document.select(&info_selector));
+  while let Some(info_element) = info_stream.next().await {
+    let dt_selector = Selector::parse("dt").unwrap();
+    let dd_text_selector = Selector::parse("dd > p").unwrap();
+    let dd_link_selector = Selector::parse("dd > p > a").unwrap();
+    let dt_text = info_element
+      .select(&dt_selector)
+      .next()
+      .unwrap()
+      .text()
+      .collect::<String>()
+      .trim()
+      .to_string();
+    match &*dt_text {
+      "事件番号" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        case_number = text;
+      }
+      "事件名" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        case_name = text;
+      }
+      "裁判年月日" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        date_str = text;
+      }
+      "裁判所名" | "裁判所名・部" | "法廷名" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        court_name = remove_line_break(&text);
+      }
+      "権利種別" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          right_type = Some(text);
+        }
+      }
+      "訴訟類型" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          lawsuit_type = Some(text);
+        }
+      }
+      "裁判種別" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          result_type = Some(text);
+        }
+      }
+      "結果" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          result = Some(text);
+        }
+      }
+      "判例集等巻・号・頁" | "高裁判例集登載巻・号・頁" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          article_info = Some(text);
+        }
+      }
+      "原審裁判所名" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          original_court_name = Some(text);
+        }
+      }
+      "原審事件番号" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          original_case_number = Some(text);
+        }
+      }
+      "原審結果" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          original_result = Some(text);
+        }
+      }
+      "原審裁判年月日" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          let date = parse_date_era_str(&text).await?;
+          original_date = Some(date);
+        }
+      }
+      "分野" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          field = Some(text);
+        }
+      }
+      "判示事項の要旨" | "判示事項" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          gist = Some(text);
+        }
+      }
+      "裁判要旨" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          case_gist = Some(text);
+        }
+      }
+      "参照法条" => {
+        let text = info_element
+          .select(&dd_text_selector)
+          .next()
+          .unwrap()
+          .text()
+          .collect::<String>()
+          .trim()
+          .to_string();
+        if !text.is_empty() {
+          ref_law = Some(text);
+        }
+      }
+      "全文" => {
+        let link = info_element
+          .select(&dd_link_selector)
+          .next()
+          .unwrap()
+          .value()
+          .attr("href")
+          .expect("a属性はhrefを持っているはず");
+        // <a href="./../../../assets/hanrei/hanrei-pdf-93712.pdf" target="_blank">全文<i class="icon-pdf"></i></a>という形をしている
+        let l = pdf_link_re
+          .captures(link)
+          .unwrap()
+          .name("link")
+          .unwrap()
+          .as_str();
+        full_pdf_link = format!("{COURTS_DOMEIN}/{l}");
+      }
+      _ => info!("!!! OTHER: {}", &dt_text),
+    }
+  }
+  let date = parse_date_era_str(date_str.trim()).await?;
+  let precedent_data = PrecedentData {
+    trial_type: trial_type.clone(),
+    date: date.clone(),
+    case_number: case_number.clone(),
+    case_name,
+    court_name,
+    right_type,
+    lawsuit_type,
+    result_type,
+    result,
+    article_info,
+    original_court_name,
+    original_case_number,
+    original_result,
+    original_date,
+    field,
+    gist,
+    case_gist,
+    ref_law,
+    lawsuit_id: lawsuit_id.to_string(),
+    detail_page_link,
+    contents: get_pdf_text(&full_pdf_link, pdf_folder, lawsuit_id)
+      .await
+      .ok(),
+    full_pdf_link,
+  };
+
+  Ok(precedent_data)
+}
+
+async fn get_pdf_text(pdf_link: &str, pdf_folder: &str, id: usize) -> Result<String> {
+  let result = reqwest::get(pdf_link).await;
+  let bytes = result?.bytes().await?;
+  let text = pdf_bytes_to_text(&bytes)?;
+  let text = clean_up(&text);
+
+  let mut file = File::create(format!("{pdf_folder}/{id}.pdf")).await?;
+  file.write_all(&bytes).await?;
+
+  Ok(text)
 }
 
 fn remove_line_break(str: &str) -> String {
@@ -207,6 +538,9 @@ struct Args {
   /// 解析結果を出力するJSONファイルへのpath
   #[clap(short, long)]
   output: String,
+  /// PDFファイルを保存するフォルダへのpath
+  #[clap(short, long)]
+  pdf: String,
   /// 一覧を出力するJSONファイル名
   #[clap(short, long)]
   index: String,
@@ -232,9 +566,9 @@ async fn main() -> Result<()> {
   info!("start_date: {}", &args.start);
   info!("end_date: {}", &args.end);
 
-  let top_html = get_reqest(&start_date, &end_date, 1).await?;
+  let top_html = get_index_page(&start_date, &end_date, 0).await?;
   let top_document = Html::parse_document(&top_html);
-  let all_quantity_selector = Selector::parse("div.module-search-page-paging-parts2 > p").unwrap();
+  let all_quantity_selector = Selector::parse("div.search-result > div.paging-parts2 > p").unwrap();
   // "64297件中11～20件を表示"のような値になっている
   let all_quantity_text = top_document
     .select(&all_quantity_selector)
@@ -242,35 +576,43 @@ async fn main() -> Result<()> {
     .unwrap()
     .text()
     .collect::<String>();
-  let re = Regex::new(r"\d+").unwrap();
-  let all_quantity = &re.captures(&all_quantity_text).unwrap()[0].parse::<usize>()?;
-  let all_page_quantity = all_quantity / 10;
-  let all_page_quantity = if all_quantity % 10 == 0 {
+  let re = Regex::new(r"(?<all>\d+)[^\d]+(?<start>\d+)[^\d]+(?<end>\d+)[^\d]+").unwrap();
+  let quantitity_info = &re.captures(&all_quantity_text).unwrap();
+  let all_quantity = quantitity_info
+    .name("all")
+    .unwrap()
+    .as_str()
+    .parse::<usize>()?;
+  let page_quantity = quantitity_info
+    .name("end")
+    .unwrap()
+    .as_str()
+    .parse::<usize>()?;
+
+  let all_page_quantity = all_quantity / page_quantity;
+  let all_page_quantity = if all_quantity % page_quantity == 0 {
     all_page_quantity
   } else {
     all_page_quantity + 1
   };
-  let mut stream = tokio_stream::iter(1..=all_page_quantity);
-  let link_re = Regex::new(r"[^\d]+(?P<type_number>\d).*").unwrap();
+  let mut stream = tokio_stream::iter(0..=all_page_quantity);
+
+  // TODO 以下要修正
+
+  let link_re = Regex::new(r".+/detail(?P<type_number>\d)/.*").unwrap();
   let file_path = &args.output;
   let mut index_file = gen_file_value_lst(&args.index).await?;
   info!("[START] writing file: {}", &file_path);
   while let Some(page_num) = stream.next().await {
     info!("page_num: {}", page_num);
-    let html = get_reqest(&start_date, &end_date, page_num).await?;
+    let html = get_index_page(&start_date, &end_date, page_num * page_quantity).await?;
     info!("html ok");
     let page_document = Html::parse_document(&html);
-    let detail_page_link_selector = Selector::parse("table > tbody > tr > th > a").unwrap();
-    let mut detail_page_link_stream =
-      tokio_stream::iter(page_document.select(&detail_page_link_selector));
-    while let Some(detail_page_link) = detail_page_link_stream.next().await {
-      let link = detail_page_link
-        .value()
-        .attr("href")
-        .expect("a属性はhrefを持っているはず");
-      info!("link: {}", &link);
+    let mut detail_page_link_stream = tokio_stream::iter(parse_index_page(page_document).await);
+    while let Some((lawsuit_id, detail_page_link)) = detail_page_link_stream.next().await {
+      info!("[GET] {detail_page_link}");
       let trial_type = match link_re
-        .captures(link)
+        .captures(&detail_page_link)
         .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
         .name("type_number")
         .ok_or_else(|| anyhow!("リンクが想定外の形をしている"))?
@@ -283,299 +625,12 @@ async fn main() -> Result<()> {
         5 => TrialType::AdministrativeCase,
         6 => TrialType::LaborCase,
         7 => TrialType::IPCase,
+        8 => TrialType::IPCase,
         _ => unreachable!(),
       };
-      let detail_page_link = format!("{COURTS_DOMEIN}{link}");
-      let lawsuit_id = get_lawsuit_id(&detail_page_link).await?;
       info!("[START] date write: {}", &lawsuit_id);
-      let detail_page_html = reqwest::get(&detail_page_link).await?.text().await?;
-      let detail_document = Html::parse_document(&detail_page_html);
-      let info_selector =
-        Selector::parse("div.module-search-page-table-parts-result-detail > dl").unwrap();
-      let mut date_str = String::new();
-      let mut case_number = String::new();
-      let mut case_name = String::new();
-      let mut court_name = String::new();
-      let mut right_type = None;
-      let mut lawsuit_type = None;
-      let mut result_type = None;
-      let mut result = None;
-      let mut article_info = None;
-      let mut original_court_name = None;
-      let mut original_case_number = None;
-      let mut original_result = None;
-      let mut original_date = None;
-      let mut field = None;
-      let mut gist = None;
-      let mut case_gist = None;
-      let mut ref_law = None;
-      let mut full_pdf_link = String::new();
-      let mut info_stream = tokio_stream::iter(detail_document.select(&info_selector));
-      while let Some(info_element) = info_stream.next().await {
-        let dt_selector = Selector::parse("dt").unwrap();
-        let dd_text_selector = Selector::parse("dd > p").unwrap();
-        let dd_link_selector = Selector::parse("dd > ul > li > a").unwrap();
-        let dt_text = info_element
-          .select(&dt_selector)
-          .next()
-          .unwrap()
-          .text()
-          .collect::<String>()
-          .trim()
-          .to_string();
-        match &*dt_text {
-          "事件番号" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            case_number = text;
-          }
-          "事件名" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            case_name = text;
-          }
-          "裁判年月日" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            date_str = text;
-          }
-          "裁判所名" | "裁判所名・部" | "法廷名" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            court_name = remove_line_break(&text);
-          }
-          "権利種別" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              right_type = Some(text);
-            }
-          }
-          "訴訟類型" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              lawsuit_type = Some(text);
-            }
-          }
-          "裁判種別" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              result_type = Some(text);
-            }
-          }
-          "結果" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              result = Some(text);
-            }
-          }
-          "判例集等巻・号・頁" | "高裁判例集登載巻・号・頁" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              article_info = Some(text);
-            }
-          }
-          "原審裁判所名" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              original_court_name = Some(text);
-            }
-          }
-          "原審事件番号" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              original_case_number = Some(text);
-            }
-          }
-          "原審結果" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              original_result = Some(text);
-            }
-          }
-          "原審裁判年月日" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              let date = parse_date_era_str(&text).await?;
-              original_date = Some(date);
-            }
-          }
-          "分野" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              field = Some(text);
-            }
-          }
-          "判示事項の要旨" | "判示事項" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              gist = Some(text);
-            }
-          }
-          "裁判要旨" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              case_gist = Some(text);
-            }
-          }
-          "参照法条" => {
-            let text = info_element
-              .select(&dd_text_selector)
-              .next()
-              .unwrap()
-              .text()
-              .collect::<String>()
-              .trim()
-              .to_string();
-            if !text.is_empty() {
-              ref_law = Some(text);
-            }
-          }
-          "全文" => {
-            let link = info_element
-              .select(&dd_link_selector)
-              .next()
-              .unwrap()
-              .value()
-              .attr("href")
-              .expect("a属性はhrefを持っているはず");
-            full_pdf_link = format!("{COURTS_DOMEIN}{link}");
-          }
-          _ => info!("!!! OTHER: {}", &dt_text),
-        }
-      }
-      let date = parse_date_era_str(date_str.trim()).await?;
-      let precedent_data = PrecedentData {
-        trial_type: trial_type.clone(),
-        date: date.clone(),
-        case_number: case_number.clone(),
-        case_name,
-        court_name,
-        right_type,
-        lawsuit_type,
-        result_type,
-        result,
-        article_info,
-        original_court_name,
-        original_case_number,
-        original_result,
-        original_date,
-        field,
-        gist,
-        case_gist,
-        ref_law,
-        lawsuit_id: lawsuit_id.clone(),
-        detail_page_link,
-        contents: get_pdf_text(&full_pdf_link).await.ok(),
-        full_pdf_link,
-      };
+      let precedent_data =
+        get_and_parse_detail_page(detail_page_link, lawsuit_id, trial_type, &args.pdf).await?;
       let precedent_info = PrecedentInfo {
         case_number: precedent_data.case_number.clone(),
         court_name: precedent_data.court_name.clone(),
