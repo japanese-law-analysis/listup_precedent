@@ -640,50 +640,50 @@ async fn main() -> Result<()> {
   let top_document = Html::parse_document(&top_html);
   let all_quantity_selector = Selector::parse("div.search-result > div.paging-parts2 > p").unwrap();
   // "64297件中11～20件を表示"のような値になっている
-  let all_quantity_text = top_document
-    .select(&all_quantity_selector)
-    .next()
-    .ok_or(anyhow!("件数無し"))?
-    .text()
-    .collect::<String>();
-  let re = Regex::new(r"(?<all>\d+)[^\d]+(?<start>\d+)[^\d]+(?<end>\d+)[^\d]+").unwrap();
-  let quantitity_info = &re.captures(&all_quantity_text).unwrap();
-  let all_quantity = quantitity_info
-    .name("all")
-    .unwrap()
-    .as_str()
-    .parse::<usize>()?;
-  let page_quantity = quantitity_info
-    .name("end")
-    .unwrap()
-    .as_str()
-    .parse::<usize>()?;
+  let all_quantity_text_opt = top_document.select(&all_quantity_selector).next();
+  if let Some(all_quantity_text) = all_quantity_text_opt {
+    let all_quantity_text = all_quantity_text.text().collect::<String>();
+    let re = Regex::new(r"(?<all>\d+)[^\d]+(?<start>\d+)[^\d]+(?<end>\d+)[^\d]+").unwrap();
+    let quantitity_info = &re.captures(&all_quantity_text).unwrap();
+    let all_quantity = quantitity_info
+      .name("all")
+      .unwrap()
+      .as_str()
+      .parse::<usize>()?;
+    let page_quantity = quantitity_info
+      .name("end")
+      .unwrap()
+      .as_str()
+      .parse::<usize>()?;
 
-  let all_page_quantity = all_quantity / page_quantity;
-  let all_page_quantity = if all_quantity % page_quantity == 0 {
-    all_page_quantity
+    let all_page_quantity = all_quantity / page_quantity;
+    let all_page_quantity = if all_quantity % page_quantity == 0 {
+      all_page_quantity
+    } else {
+      all_page_quantity + 1
+    };
+    let mut stream = tokio_stream::iter(1..=all_page_quantity);
+
+    // TODO 以下要修正
+
+    let link_re = Regex::new(r".+/detail(?P<type_number>\d)/.*").unwrap();
+    let file_path = &args.output;
+    let mut index_file = gen_file_value_lst(&args.index).await?;
+    info!("[START] writing file: {}", &file_path);
+
+    info!("page_num: 0");
+    page_info(&args, top_document, &link_re, &mut index_file).await?;
+    while let Some(page_num) = stream.next().await {
+      info!("page_num: {}", page_num);
+      let html = get_index_page(&start_date, &end_date, page_num * page_quantity).await?;
+      info!("html ok");
+      let page_document = Html::parse_document(&html);
+      page_info(&args, page_document, &link_re, &mut index_file).await?;
+    }
+    flush_file_value_lst(&mut index_file).await?;
+    info!("[END] write json file");
   } else {
-    all_page_quantity + 1
-  };
-  let mut stream = tokio_stream::iter(1..=all_page_quantity);
-
-  // TODO 以下要修正
-
-  let link_re = Regex::new(r".+/detail(?P<type_number>\d)/.*").unwrap();
-  let file_path = &args.output;
-  let mut index_file = gen_file_value_lst(&args.index).await?;
-  info!("[START] writing file: {}", &file_path);
-
-  info!("page_num: 0");
-  page_info(&args, top_document, &link_re, &mut index_file).await?;
-  while let Some(page_num) = stream.next().await {
-    info!("page_num: {}", page_num);
-    let html = get_index_page(&start_date, &end_date, page_num * page_quantity).await?;
-    info!("html ok");
-    let page_document = Html::parse_document(&html);
-    page_info(&args, page_document, &link_re, &mut index_file).await?;
+    info!("該当無し")
   }
-  flush_file_value_lst(&mut index_file).await?;
-  info!("[END] write json file");
   Ok(())
 }
