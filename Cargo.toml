@@ -1,8 +1,8 @@
 [package]
 name = "listup_precedent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-authors = ["Naoki Kaneko <puripuri2100@gmail.com>"]
+authors = ["Naoki Kitano <puripuri2100@gmail.com>"]
 license = "MIT"
 description = "裁判例のデータ一覧を裁判所のホームページ(https://www.courts.go.jp)をスクレイピングして生成するソフトウェア"
 readme = "README.md"
