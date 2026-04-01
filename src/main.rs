@@ -119,7 +119,7 @@ async fn parse_date(str: &str) -> Result<Date> {
     let d = &caps["d"];
     let d = d.parse::<usize>()?;
     if 12 < m || 31 < d {
-      return Err(anyhow!("日付が範囲外です"));
+      Err(anyhow!("日付が範囲外です"))
     } else {
       Ok(Date::gen_from_ad(y, m, d))
     }
@@ -131,7 +131,7 @@ async fn parse_date(str: &str) -> Result<Date> {
     let d = &caps["d"];
     let d = d.parse::<usize>()?;
     if 12 < m || 31 < d {
-      return Err(anyhow!("日付が範囲外です"));
+      Err(anyhow!("日付が範囲外です"))
     } else {
       Ok(Date::gen_from_ad(y, m, d))
     }
@@ -554,6 +554,54 @@ async fn write_data(output: &str, filename: &str, data: &PrecedentData) -> Resul
   Ok(())
 }
 
+async fn page_info(
+  args: &Args,
+  page_document: Html,
+  link_re: &Regex,
+  index_file: &mut File,
+) -> Result<()> {
+  let mut detail_page_link_stream = tokio_stream::iter(parse_index_page(page_document).await);
+  while let Some((lawsuit_id, detail_page_link)) = detail_page_link_stream.next().await {
+    info!("[GET] {detail_page_link}");
+    let trial_type = match link_re
+      .captures(&detail_page_link)
+      .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
+      .name("type_number")
+      .ok_or_else(|| anyhow!("リンクが想定外の形をしている"))?
+      .as_str()
+      .parse::<usize>()?
+    {
+      2 => TrialType::SupremeCourt,
+      3 => TrialType::HighCourt,
+      4 => TrialType::LowerCourt,
+      5 => TrialType::AdministrativeCase,
+      6 => TrialType::LaborCase,
+      7 => TrialType::IPCase,
+      8 => TrialType::IPCase,
+      _ => unreachable!(),
+    };
+    info!("[START] date write: {}", &lawsuit_id);
+    let precedent_data =
+      get_and_parse_detail_page(detail_page_link, lawsuit_id, trial_type, &args.pdf).await?;
+    let precedent_info = PrecedentInfo {
+      case_number: precedent_data.case_number.clone(),
+      court_name: precedent_data.court_name.clone(),
+      trial_type: precedent_data.trial_type.clone(),
+      date: precedent_data.date.clone(),
+      lawsuit_id: precedent_data.lawsuit_id.clone(),
+    };
+    let file_name = precedent_info.file_name();
+    write_data(&args.output, &file_name, &precedent_data).await?;
+    write_value_lst(index_file, &precedent_info).await?;
+    info!("[END] date write: {}", &lawsuit_id);
+  }
+  // 負荷を抑えるために500ミリ秒待つ
+  info!("sleep");
+  tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
+
+  Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
@@ -617,7 +665,7 @@ async fn main() -> Result<()> {
   } else {
     all_page_quantity + 1
   };
-  let mut stream = tokio_stream::iter(0..=all_page_quantity);
+  let mut stream = tokio_stream::iter(1..=all_page_quantity);
 
   // TODO 以下要修正
 
@@ -625,49 +673,15 @@ async fn main() -> Result<()> {
   let file_path = &args.output;
   let mut index_file = gen_file_value_lst(&args.index).await?;
   info!("[START] writing file: {}", &file_path);
+
+  info!("page_num: 0");
+  page_info(&args, top_document, &link_re, &mut index_file).await?;
   while let Some(page_num) = stream.next().await {
     info!("page_num: {}", page_num);
     let html = get_index_page(&start_date, &end_date, page_num * page_quantity).await?;
     info!("html ok");
     let page_document = Html::parse_document(&html);
-    let mut detail_page_link_stream = tokio_stream::iter(parse_index_page(page_document).await);
-    while let Some((lawsuit_id, detail_page_link)) = detail_page_link_stream.next().await {
-      info!("[GET] {detail_page_link}");
-      let trial_type = match link_re
-        .captures(&detail_page_link)
-        .ok_or_else(|| anyhow!("年号付き日付のパースに失敗"))?
-        .name("type_number")
-        .ok_or_else(|| anyhow!("リンクが想定外の形をしている"))?
-        .as_str()
-        .parse::<usize>()?
-      {
-        2 => TrialType::SupremeCourt,
-        3 => TrialType::HighCourt,
-        4 => TrialType::LowerCourt,
-        5 => TrialType::AdministrativeCase,
-        6 => TrialType::LaborCase,
-        7 => TrialType::IPCase,
-        8 => TrialType::IPCase,
-        _ => unreachable!(),
-      };
-      info!("[START] date write: {}", &lawsuit_id);
-      let precedent_data =
-        get_and_parse_detail_page(detail_page_link, lawsuit_id, trial_type, &args.pdf).await?;
-      let precedent_info = PrecedentInfo {
-        case_number: precedent_data.case_number.clone(),
-        court_name: precedent_data.court_name.clone(),
-        trial_type: precedent_data.trial_type.clone(),
-        date: precedent_data.date.clone(),
-        lawsuit_id: precedent_data.lawsuit_id.clone(),
-      };
-      let file_name = precedent_info.file_name();
-      write_data(&args.output, &file_name, &precedent_data).await?;
-      write_value_lst(&mut index_file, &precedent_info).await?;
-      info!("[END] date write: {}", &lawsuit_id);
-    }
-    // 負荷を抑えるために500ミリ秒待つ
-    info!("sleep");
-    tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
+    page_info(&args, page_document, &link_re, &mut index_file).await?;
   }
   flush_file_value_lst(&mut index_file).await?;
   info!("[END] write json file");
