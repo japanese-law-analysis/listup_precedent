@@ -643,7 +643,7 @@ async fn main() -> Result<()> {
   let all_quantity_text = top_document
     .select(&all_quantity_selector)
     .next()
-    .unwrap()
+    .ok_or(anyhow!("件数無し"))?
     .text()
     .collect::<String>();
   let re = Regex::new(r"(?<all>\d+)[^\d]+(?<start>\d+)[^\d]+(?<end>\d+)[^\d]+").unwrap();
