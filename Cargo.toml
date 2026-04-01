@@ -1,6 +1,6 @@
 [package]
 name = "listup_precedent"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Naoki Kitano <puripuri2100@gmail.com>"]
 license = "MIT"
