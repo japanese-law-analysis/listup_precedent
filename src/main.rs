@@ -538,11 +538,12 @@ async fn get_pdf_text(
 ) -> Result<String> {
   let result = reqwest::get(pdf_link).await;
   let bytes = result?.bytes().await?;
-  let text = pdf_bytes_to_text(&bytes)?;
-  let text = clean_up(&text);
 
   let mut file = File::create(format!("{pdf_folder}/{id}_{trial_type:?}.pdf")).await?;
   file.write_all(&bytes).await?;
+
+  let text = pdf_bytes_to_text(&bytes)?;
+  let text = clean_up(&text);
 
   Ok(text)
 }
