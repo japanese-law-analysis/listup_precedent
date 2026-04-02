@@ -521,7 +521,7 @@ async fn get_and_parse_detail_page(
     ref_law,
     lawsuit_id: lawsuit_id.to_string(),
     detail_page_link,
-    contents: get_pdf_text(&full_pdf_link, pdf_folder, lawsuit_id)
+    contents: get_pdf_text(&full_pdf_link, pdf_folder, lawsuit_id, &trial_type)
       .await
       .ok(),
     full_pdf_link,
@@ -530,13 +530,18 @@ async fn get_and_parse_detail_page(
   Ok(precedent_data)
 }
 
-async fn get_pdf_text(pdf_link: &str, pdf_folder: &str, id: usize) -> Result<String> {
+async fn get_pdf_text(
+  pdf_link: &str,
+  pdf_folder: &str,
+  id: usize,
+  trial_type: &TrialType,
+) -> Result<String> {
   let result = reqwest::get(pdf_link).await;
   let bytes = result?.bytes().await?;
   let text = pdf_bytes_to_text(&bytes)?;
   let text = clean_up(&text);
 
-  let mut file = File::create(format!("{pdf_folder}/{id}.pdf")).await?;
+  let mut file = File::create(format!("{pdf_folder}/{id}_{trial_type:?}.pdf")).await?;
   file.write_all(&bytes).await?;
 
   Ok(text)
@@ -594,7 +599,7 @@ async fn page_info(
     write_data(&args.output, &file_name, &precedent_data).await?;
     write_value_lst(index_file, &precedent_info).await?;
     info!("[END] date write: {}", &lawsuit_id);
-  // 負荷を抑えるために500ミリ秒待つ
+    // 負荷を抑えるために500ミリ秒待つ
     info!("sleep");
     tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
   }
