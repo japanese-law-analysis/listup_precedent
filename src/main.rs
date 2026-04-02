@@ -594,10 +594,10 @@ async fn page_info(
     write_data(&args.output, &file_name, &precedent_data).await?;
     write_value_lst(index_file, &precedent_info).await?;
     info!("[END] date write: {}", &lawsuit_id);
-  }
   // 負荷を抑えるために500ミリ秒待つ
-  info!("sleep");
-  tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
+    info!("sleep");
+    tokio::time::sleep(tokio::time::Duration::from_millis(args.sleep_time)).await;
+  }
 
   Ok(())
 }
@@ -663,8 +663,6 @@ async fn main() -> Result<()> {
       all_page_quantity + 1
     };
     let mut stream = tokio_stream::iter(1..=all_page_quantity);
-
-    // TODO 以下要修正
 
     let link_re = Regex::new(r".+/detail(?P<type_number>\d)/.*").unwrap();
     let file_path = &args.output;
