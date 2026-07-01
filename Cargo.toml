@@ -7,7 +7,7 @@ license = "MIT"
 description = "裁判例のデータ一覧を裁判所のホームページ(https://www.courts.go.jp)をスクレイピングして生成するソフトウェア"
 readme = "README.md"
 repository = "https://github.com/japanese-law-analysis/listup_precedent"
-rust-version = "1.74.1"
+rust-version = "1.88.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
